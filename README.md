@@ -51,3 +51,14 @@
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=Zarosmm/obs-bilibili-stream&type=date&legend=top-left)](https://www.star-history.com/#Zarosmm/obs-bilibili-stream&type=date&legend=top-left)
+
+
+## 自动化联动（无人值守）
+
+仓库已提供自动化脚本（`automation/obs_bilibili_scheduler.py`），可在 Windows Server 上完成：
+
+1. 定时获取 RTMP 地址与推流码
+2. 通过 OBS WebSocket 自动设置推流服务
+3. 定时开始推流与停止推流
+
+详见：`automation/README.md`。
