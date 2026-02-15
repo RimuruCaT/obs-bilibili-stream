@@ -1,6 +1,7 @@
 # 自动化联动（Bilibili + OBS WebSocket）
 
 这个目录提供一个独立脚本 `obs_bilibili_scheduler.py`，用于在 Windows Server 上无人值守执行，并且默认直接复用原插件扫码登录后的配置（真正联动原仓库流程）：
+这个目录提供一个独立脚本 `obs_bilibili_scheduler.py`，用于在 Windows Server 上无人值守执行：
 
 1. `prepare_time`：调用 B 站开播接口，获取当日 RTMP 地址/推流码。
 2. `start_time`：通过 OBS WebSocket 设置推流服务并自动开始推流。
@@ -27,6 +28,10 @@ copy automation\config.example.json automation\config.json
 - `integration.obs_plugin_config_path`：OBS 插件配置路径，脚本从这里读取 `cookies/csrf_token/room_id/area_id`。
   - 默认：`%APPDATA%/obs-studio/plugin_config/bilibili-stream-for-obs/config.json`
 - `integration.sync_back_rtmp_to_plugin_config`：prepare 阶段后将 RTMP 地址/推流码回写到插件配置。
+关键字段：
+
+- `bilibili.cookies`：必须包含 `SESSDATA`、`bili_jct`、`DedeUserID`。
+- `bilibili.room_id`、`bilibili.csrf_token`：与账号匹配。
 - `obs.host/port/password`：对应 OBS WebSocket (通常 4455)。
 - `schedule.prepare_time/start_time/stop_time`：每天执行时间（`HH:MM`）。
 - `schedule.timezone`：建议 `Asia/Shanghai`。
@@ -89,3 +94,6 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 - `prepare` 阶段会调用 B 站 `startLive`，这在平台侧会使直播间进入开播状态。
 - 若 B 站返回人脸认证（例如 code `60024`），需要人工完成后才能继续自动流程。
 - Cookie 过期时，可重新在插件里扫码登录，脚本会自动读到新值。
+- `prepare` 阶段会调用 B 站 `startLive`，这在平台侧会使直播间进入开播状态。
+- 若 B 站返回人脸认证（例如 code `60024`），需要人工完成后才能继续自动流程。
+- Cookie 过期会导致任务失败，需要定期更新配置。

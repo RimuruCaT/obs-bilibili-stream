@@ -61,5 +61,8 @@
 2. 定时获取 RTMP 地址与推流码
 3. 通过 OBS WebSocket 自动设置推流服务
 4. 定时开始推流与停止推流
+1. 定时获取 RTMP 地址与推流码
+2. 通过 OBS WebSocket 自动设置推流服务
+3. 定时开始推流与停止推流
 
 详见：`automation/README.md`。
