@@ -31,6 +31,8 @@ copy automation\config.example.json automation\config.json
 - `schedule.prepare_time/start_time/stop_time`：每天执行时间（`HH:MM`）。
 - `schedule.timezone`：建议 `Asia/Shanghai`。
 - `runtime.auto_stop_bilibili_on_manual_obs_stop`：若检测到你在 OBS 手动点了“停止推流”，脚本会自动同步调用 B 站停播。
+- `runtime.enable_cookie_keepalive`：定时登录态保活检查并尝试刷新 cookies（默认开启）。
+- `runtime.cookie_keepalive_interval_minutes`：保活检查间隔分钟数（默认 20）。
 
 如果你明确不想读取插件配置，可把 `integration.use_obs_plugin_config` 改为 `false`，再手动填写 `bilibili.room_id/csrf_token/cookies`。
 
@@ -68,6 +70,7 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 ## 4. 稳定性设计
 
 - **跨天调度顺序**：`prepare -> start -> stop` 以一个 cycle 执行；当 `stop_time` 早于/等于 `start_time` 时会自动按“次日停播”处理。
+- **Cookie 保活与回写**：运行中按间隔调用登录态检查；若服务端返回新 cookies，会自动回写到插件配置，尽量降低过期概率。
 - **空闲心跳日志**：`run` 模式未到触发时间时会周期性输出下一阶段等待信息，避免看起来像“卡住不动”。
 - **OBS 手动停播联动**：你在 OBS 手动点击停止推流后，脚本检测到流状态从活跃变为停止，会自动调用 B 站停播接口，避免还要在插件里再点一次“停止直播”。
 - **重试机制**：接口/OBS 调用失败自动重试（指数退避 + 抖动）。
@@ -98,6 +101,7 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 - `prepare` 阶段会调用 B 站 `startLive`，这在平台侧会使直播间进入开播状态。
 - 若 B 站返回人脸认证（例如 code `60024`），需要人工完成后才能继续自动流程。
 - Cookie 过期时，可重新在插件里扫码登录，脚本会自动读到新值。
+- 注意：保活机制是“尽量降低过期概率”，不能保证永不过期，也不能绕过平台的人脸/风控校验。
 
 
 ## 7. 常见问题

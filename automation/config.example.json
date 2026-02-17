@@ -33,6 +33,8 @@
     "log_max_bytes": 5242880,
     "verify_login_before_prepare": true,
     "stop_bilibili_after_obs_stop": true,
-    "auto_stop_bilibili_on_manual_obs_stop": true
+    "auto_stop_bilibili_on_manual_obs_stop": true,
+    "enable_cookie_keepalive": true,
+    "cookie_keepalive_interval_minutes": 20
   }
 }

@@ -62,6 +62,8 @@ class RuntimeConfig:
     verify_login_before_prepare: bool
     stop_bilibili_after_obs_stop: bool
     auto_stop_bilibili_on_manual_obs_stop: bool
+    enable_cookie_keepalive: bool
+    cookie_keepalive_interval_minutes: int
 
 
 @dataclass
@@ -177,6 +179,29 @@ def retry_call(
     raise RetryError(f"{action} failed after {retry_count} attempts: {last_exc}")
 
 
+def parse_cookie_string(cookie_str: str) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for part in cookie_str.split(';'):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        k, v = part.split('=', 1)
+        result[k.strip()] = v.strip()
+    return result
+
+
+def build_cookie_string(cookie_map: Dict[str, str]) -> str:
+    return '; '.join(f"{k}={v}" for k, v in cookie_map.items() if v) + ';'
+
+
+def merge_cookie_strings(base_cookie_str: str, jar: Any) -> str:
+    cookies = parse_cookie_string(base_cookie_str)
+    for c in jar:
+        if getattr(c, 'name', None) and getattr(c, 'value', None) is not None:
+            cookies[c.name] = c.value
+    return build_cookie_string(cookies)
+
+
 class BilibiliClient:
     def __init__(self, room_id: str, csrf_token: str, cookies: str, timeout: int = 15) -> None:
         self.room_id = room_id
@@ -203,13 +228,30 @@ class BilibiliClient:
         signed_items["sign"] = sign
         return urlencode(sorted(signed_items.items()))
 
-    def check_login(self) -> bool:
+    def check_login_with_cookie_refresh(self) -> Tuple[bool, Optional[str], Optional[str]]:
         import requests
 
         resp = requests.get(CHECK_LOGIN_URL, headers=self._headers(), timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        return bool(data.get("data", {}).get("isLogin"))
+        is_login = bool(data.get("data", {}).get("isLogin"))
+
+        refreshed_cookie_str = None
+        refreshed_csrf = None
+        if resp.cookies:
+            merged = merge_cookie_strings(self.cookies, resp.cookies)
+            if merged != self.cookies:
+                refreshed_cookie_str = merged
+                refreshed_csrf = parse_cookie_string(merged).get('bili_jct')
+        return is_login, refreshed_cookie_str, refreshed_csrf
+
+    def check_login(self) -> bool:
+        is_login, refreshed_cookie_str, refreshed_csrf = self.check_login_with_cookie_refresh()
+        if refreshed_cookie_str:
+            self.cookies = refreshed_cookie_str
+            if refreshed_csrf:
+                self.csrf_token = refreshed_csrf
+        return is_login
 
     def _get_live_version(self) -> Tuple[str, str]:
         params = {
@@ -370,6 +412,8 @@ class DailyScheduler:
             auto_stop_bilibili_on_manual_obs_stop=bool(
                 runtime_cfg.get("auto_stop_bilibili_on_manual_obs_stop", True)
             ),
+            enable_cookie_keepalive=bool(runtime_cfg.get("enable_cookie_keepalive", True)),
+            cookie_keepalive_interval_minutes=int(runtime_cfg.get("cookie_keepalive_interval_minutes", 20)),
         )
 
         integration_cfg = config.get("integration", {})
@@ -423,6 +467,7 @@ class DailyScheduler:
             "last_rtmp_code": "",
             "last_credentials_source": "",
             "last_obs_stream_active": None,
+            "last_keepalive_at": "",
             "last_error": "",
             "updated_at": "",
         }
@@ -481,6 +526,59 @@ class DailyScheduler:
         plugin_cfg["rtmp_addr"] = rtmp_addr
         plugin_cfg["rtmp_code"] = rtmp_code
         save_json(plugin_path, plugin_cfg)
+
+    def _sync_auth_to_plugin_config(self, cookies: str, csrf_token: Optional[str]) -> None:
+        if not self.bridge.enabled:
+            return
+        plugin_path = self._resolve_plugin_config_path()
+        plugin_cfg = self._read_plugin_config()
+        plugin_cfg["cookies"] = cookies
+        if csrf_token:
+            plugin_cfg["csrf_token"] = csrf_token
+        save_json(plugin_path, plugin_cfg)
+
+    def _should_keepalive(self, state: Dict[str, Any], now: datetime) -> bool:
+        if not self.runtime.enable_cookie_keepalive:
+            return False
+        interval = max(1, self.runtime.cookie_keepalive_interval_minutes)
+        last = state.get("last_keepalive_at")
+        if not last:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(str(last))
+        except Exception:
+            return True
+        return now >= last_dt + timedelta(minutes=interval)
+
+    def _keepalive_cookie_if_needed(self, state: Dict[str, Any], now: datetime) -> None:
+        if not self._should_keepalive(state, now):
+            return
+
+        self._refresh_bilibili_client(state)
+
+        is_login, refreshed_cookie_str, refreshed_csrf = retry_call(
+            "cookie_keepalive_check_login",
+            self.bili.check_login_with_cookie_refresh,
+            self.runtime.retry_count,
+            self.runtime.retry_base_delay_seconds,
+            self.runtime.retry_max_delay_seconds,
+        )
+
+        state["last_keepalive_at"] = now.isoformat()
+        if not is_login:
+            state["last_error"] = "cookie keepalive detected login invalid"
+            self._save_state(state)
+            logging.warning("Cookie keepalive detected invalid login; please re-login via plugin QR")
+            return
+
+        if refreshed_cookie_str:
+            self.bili.cookies = refreshed_cookie_str
+            if refreshed_csrf:
+                self.bili.csrf_token = refreshed_csrf
+            self._sync_auth_to_plugin_config(self.bili.cookies, refreshed_csrf)
+            logging.info("Cookie keepalive refreshed and wrote back plugin config")
+
+        self._save_state(state)
 
     def _load_state(self) -> Dict[str, Any]:
         if not os.path.exists(self.runtime.state_file):
@@ -708,6 +806,7 @@ class DailyScheduler:
 
             try:
                 self._handle_manual_obs_stop_if_needed(state)
+                self._keepalive_cookie_if_needed(state, now)
 
                 stage = self._next_pending_stage(state, now)
                 if stage == "prepare":
