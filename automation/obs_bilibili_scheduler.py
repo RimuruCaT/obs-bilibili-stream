@@ -64,6 +64,7 @@ class RuntimeConfig:
     auto_stop_bilibili_on_manual_obs_stop: bool
     enable_cookie_keepalive: bool
     cookie_keepalive_interval_minutes: int
+    wait_heartbeat_interval_minutes: int
 
 
 @dataclass
@@ -414,6 +415,7 @@ class DailyScheduler:
             ),
             enable_cookie_keepalive=bool(runtime_cfg.get("enable_cookie_keepalive", True)),
             cookie_keepalive_interval_minutes=int(runtime_cfg.get("cookie_keepalive_interval_minutes", 20)),
+            wait_heartbeat_interval_minutes=int(runtime_cfg.get("wait_heartbeat_interval_minutes", 10)),
         )
 
         integration_cfg = config.get("integration", {})
@@ -670,6 +672,18 @@ class DailyScheduler:
             return "stop"
         return None
 
+    def _next_stage_target(self, state: Dict[str, Any]) -> Tuple[str, datetime]:
+        prepare_dt, start_dt, stop_dt = self._cycle_datetimes(state)
+        if not state.get("prepare_done"):
+            return "prepare", prepare_dt
+        if not state.get("start_done"):
+            return "start", start_dt
+        if not state.get("stop_done"):
+            return "stop", stop_dt
+        # Should not happen in normal path; provide next cycle prepare as fallback.
+        next_prepare = prepare_dt + timedelta(days=1)
+        return "prepare", next_prepare
+
     def _handle_manual_obs_stop_if_needed(self, state: Dict[str, Any]) -> None:
         if not self.runtime.auto_stop_bilibili_on_manual_obs_stop:
             return
@@ -820,14 +834,21 @@ class DailyScheduler:
                     self._stop(state)
                 else:
                     idle_ticks += 1
-                    if idle_ticks % max(1, int(60 / self.runtime.loop_interval_seconds)) == 0:
-                        pdt, sdt, tdt = self._cycle_datetimes(state)
+                    heartbeat_secs = max(60, int(self.runtime.wait_heartbeat_interval_minutes) * 60)
+                    if idle_ticks % max(1, int(heartbeat_secs / self.runtime.loop_interval_seconds)) == 0:
+                        next_stage, next_dt = self._next_stage_target(state)
+                        seconds_left = max(0, int((next_dt - now).total_seconds()))
+                        hours = seconds_left // 3600
+                        minutes = (seconds_left % 3600) // 60
+                        seconds = seconds_left % 60
                         logging.info(
-                            "Waiting for next stage. cycle=%s prepare=%s start=%s stop=%s",
+                            "Waiting for next stage. Next=%s at %s (in %02dh:%02dm:%02ds). cycle=%s",
+                            next_stage,
+                            next_dt.isoformat(),
+                            hours,
+                            minutes,
+                            seconds,
                             state.get("cycle_date"),
-                            pdt.isoformat(),
-                            sdt.isoformat(),
-                            tdt.isoformat(),
                         )
             except Exception as exc:
                 logging.exception("Stage execution failed: %s", exc)

@@ -35,6 +35,7 @@
     "stop_bilibili_after_obs_stop": true,
     "auto_stop_bilibili_on_manual_obs_stop": true,
     "enable_cookie_keepalive": true,
-    "cookie_keepalive_interval_minutes": 20
+    "cookie_keepalive_interval_minutes": 20,
+    "wait_heartbeat_interval_minutes": 10
   }
 }

@@ -33,6 +33,7 @@ copy automation\config.example.json automation\config.json
 - `runtime.auto_stop_bilibili_on_manual_obs_stop`：若检测到你在 OBS 手动点了“停止推流”，脚本会自动同步调用 B 站停播。
 - `runtime.enable_cookie_keepalive`：定时登录态保活检查并尝试刷新 cookies（默认开启）。
 - `runtime.cookie_keepalive_interval_minutes`：保活检查间隔分钟数（默认 20）。
+- `runtime.wait_heartbeat_interval_minutes`：空闲等待日志心跳间隔（分钟，默认 10）。
 
 如果你明确不想读取插件配置，可把 `integration.use_obs_plugin_config` 改为 `false`，再手动填写 `bilibili.room_id/csrf_token/cookies`。
 
@@ -71,7 +72,7 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 
 - **跨天调度顺序**：`prepare -> start -> stop` 以一个 cycle 执行；当 `stop_time` 早于/等于 `start_time` 时会自动按“次日停播”处理。
 - **Cookie 保活与回写**：运行中按间隔调用登录态检查；若服务端返回新 cookies，会自动回写到插件配置，尽量降低过期概率。
-- **空闲心跳日志**：`run` 模式未到触发时间时会周期性输出下一阶段等待信息，避免看起来像“卡住不动”。
+- **空闲心跳日志**：`run` 模式未到触发时间时会周期性输出下一阶段等待信息（英文，包含 “in HH:MM:SS” 倒计时），避免看起来像“卡住不动”。
 - **OBS 手动停播联动**：你在 OBS 手动点击停止推流后，脚本检测到流状态从活跃变为停止，会自动调用 B 站停播接口，避免还要在插件里再点一次“停止直播”。
 - **重试机制**：接口/OBS 调用失败自动重试（指数退避 + 抖动）。
 - **状态文件**：`runtime.state_file` 记录当天阶段状态，避免重复执行。
@@ -112,3 +113,6 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 
 - 报错 `Invalid \escape`（通常是 `config.json` 写了 `C:\xxx` 这种未转义路径）：
   - 把路径改成 `C:/xxx`，或写成 `C:\\xxx`（双反斜杠）。
+
+- 终端长期运行会累积滚动历史显示，但脚本本身不缓存全部日志；如担心终端窗口负担，建议重定向到文件或用任务计划程序后台运行。
+- 文件日志已采用轮转（`log_max_bytes` + `log_backup_count`）；一般不需要“清空终端”来控制脚本内存。
