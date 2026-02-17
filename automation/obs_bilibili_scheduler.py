@@ -24,7 +24,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlencode
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 
@@ -123,6 +123,16 @@ def parse_hhmm(value: str) -> Tuple[int, int]:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError(f"Invalid HH:MM time: {value}")
     return hour, minute
+
+
+def resolve_timezone(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(
+            f"Timezone '{tz_name}' is unavailable. On Windows install tzdata: "
+            "python -m pip install tzdata"
+        ) from exc
 
 
 def retry_call(
@@ -339,7 +349,7 @@ class DailyScheduler:
             ),
         )
 
-        self.tz = ZoneInfo(config["schedule"]["timezone"])
+        self.tz = resolve_timezone(config["schedule"]["timezone"])
 
         bilibili_cfg = config["bilibili"]
         self.area_id = int(bilibili_cfg.get("area_id", 86))
@@ -643,7 +653,7 @@ def validate_config(config: Dict[str, Any]) -> None:
     parse_hhmm(config["schedule"]["prepare_time"])
     parse_hhmm(config["schedule"]["start_time"])
     parse_hhmm(config["schedule"]["stop_time"])
-    ZoneInfo(config["schedule"]["timezone"])
+    resolve_timezone(config["schedule"]["timezone"])
 
     integration_cfg = config.get("integration", {})
     if "obs_plugin_config_path" in integration_cfg:

@@ -33,13 +33,6 @@ copy automation\config.example.json automation\config.json
 - `runtime.auto_stop_bilibili_on_manual_obs_stop`：若检测到你在 OBS 手动点了“停止推流”，脚本会自动同步调用 B 站停播。
 
 如果你明确不想读取插件配置，可把 `integration.use_obs_plugin_config` 改为 `false`，再手动填写 `bilibili.room_id/csrf_token/cookies`。
-关键字段：
-
-- `bilibili.cookies`：必须包含 `SESSDATA`、`bili_jct`、`DedeUserID`。
-- `bilibili.room_id`、`bilibili.csrf_token`：与账号匹配。
-- `obs.host/port/password`：对应 OBS WebSocket (通常 4455)。
-- `schedule.prepare_time/start_time/stop_time`：每天执行时间（`HH:MM`）。
-- `schedule.timezone`：建议 `Asia/Shanghai`。
 
 ## 3. 运行模式
 
@@ -98,3 +91,10 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 - `prepare` 阶段会调用 B 站 `startLive`，这在平台侧会使直播间进入开播状态。
 - 若 B 站返回人脸认证（例如 code `60024`），需要人工完成后才能继续自动流程。
 - Cookie 过期时，可重新在插件里扫码登录，脚本会自动读到新值。
+
+
+## 7. 常见问题
+
+- 报错 `No time zone found with key Asia/Shanghai`：
+  - 运行：`python -m pip install tzdata`
+  - 然后重试 `--mode doctor`。
