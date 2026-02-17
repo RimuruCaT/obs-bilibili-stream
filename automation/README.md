@@ -67,6 +67,8 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 
 ## 4. 稳定性设计
 
+- **跨天调度顺序**：`prepare -> start -> stop` 以一个 cycle 执行；当 `stop_time` 早于/等于 `start_time` 时会自动按“次日停播”处理。
+- **空闲心跳日志**：`run` 模式未到触发时间时会周期性输出下一阶段等待信息，避免看起来像“卡住不动”。
 - **OBS 手动停播联动**：你在 OBS 手动点击停止推流后，脚本检测到流状态从活跃变为停止，会自动调用 B 站停播接口，避免还要在插件里再点一次“停止直播”。
 - **重试机制**：接口/OBS 调用失败自动重试（指数退避 + 抖动）。
 - **状态文件**：`runtime.state_file` 记录当天阶段状态，避免重复执行。

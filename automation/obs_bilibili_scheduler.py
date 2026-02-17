@@ -20,7 +20,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -415,7 +415,7 @@ class DailyScheduler:
 
     def _default_state(self) -> Dict[str, Any]:
         return {
-            "date": "",
+            "cycle_date": "",
             "prepare_done": False,
             "start_done": False,
             "stop_done": False,
@@ -498,13 +498,39 @@ class DailyScheduler:
         state["updated_at"] = datetime.now(self.tz).isoformat()
         save_json(self.runtime.state_file, state)
 
-    def _roll_day_if_needed(self, state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
-        today = now.date().isoformat()
-        if state["date"] != today:
-            logging.info("New day detected (%s), reset daily flags", today)
+    def _cycle_datetimes(self, state: Dict[str, Any]) -> Tuple[datetime, datetime, datetime]:
+        if not state.get("cycle_date"):
+            state["cycle_date"] = datetime.now(self.tz).date().isoformat()
+
+        cycle_anchor = datetime.fromisoformat(str(state["cycle_date"])).replace(tzinfo=self.tz)
+
+        p_h, p_m = parse_hhmm(self.prepare_time)
+        s_h, s_m = parse_hhmm(self.start_time)
+        t_h, t_m = parse_hhmm(self.stop_time)
+
+        prepare_dt = cycle_anchor.replace(hour=p_h, minute=p_m, second=0, microsecond=0)
+        start_dt = cycle_anchor.replace(hour=s_h, minute=s_m, second=0, microsecond=0)
+
+        stop_anchor = cycle_anchor
+        if (t_h, t_m) <= (s_h, s_m):
+            stop_anchor = cycle_anchor + timedelta(days=1)
+        stop_dt = stop_anchor.replace(hour=t_h, minute=t_m, second=0, microsecond=0)
+        return prepare_dt, start_dt, stop_dt
+
+    def _maybe_advance_cycle(self, state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+        if not state.get("cycle_date"):
+            state["cycle_date"] = now.date().isoformat()
+            self._save_state(state)
+            return state
+
+        prepare_dt, _start_dt, _stop_dt = self._cycle_datetimes(state)
+        # Start next cycle only after previous cycle finished.
+        if state.get("stop_done") and now >= (prepare_dt + timedelta(days=1)):
+            next_cycle_date = (datetime.fromisoformat(str(state["cycle_date"])) + timedelta(days=1)).date().isoformat()
+            logging.info("Advance stream cycle: %s -> %s", state["cycle_date"], next_cycle_date)
             state.update(
                 {
-                    "date": today,
+                    "cycle_date": next_cycle_date,
                     "prepare_done": False,
                     "start_done": False,
                     "stop_done": False,
@@ -514,11 +540,16 @@ class DailyScheduler:
             self._save_state(state)
         return state
 
-    def _should_run(self, now: datetime, hhmm: str, done: bool) -> bool:
-        hour, minute = parse_hhmm(hhmm)
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return now >= target and not done
+    def _next_pending_stage(self, state: Dict[str, Any], now: datetime) -> Optional[str]:
+        prepare_dt, start_dt, stop_dt = self._cycle_datetimes(state)
 
+        if not state.get("prepare_done") and now >= prepare_dt:
+            return "prepare"
+        if state.get("prepare_done") and not state.get("start_done") and now >= start_dt:
+            return "start"
+        if state.get("start_done") and not state.get("stop_done") and now >= stop_dt:
+            return "stop"
+        return None
 
     def _handle_manual_obs_stop_if_needed(self, state: Dict[str, Any]) -> None:
         if not self.runtime.auto_stop_bilibili_on_manual_obs_stop:
@@ -641,19 +672,35 @@ class DailyScheduler:
             self.tz,
         )
 
+        idle_ticks = 0
         while not self.stopper.stop_requested:
             now = datetime.now(self.tz)
-            state = self._roll_day_if_needed(self._load_state(), now)
+            state = self._maybe_advance_cycle(self._load_state(), now)
 
             try:
                 self._handle_manual_obs_stop_if_needed(state)
 
-                if self._should_run(now, self.prepare_time, bool(state["prepare_done"])):
+                stage = self._next_pending_stage(state, now)
+                if stage == "prepare":
+                    idle_ticks = 0
                     self._prepare(state)
-                elif self._should_run(now, self.start_time, bool(state["start_done"])):
+                elif stage == "start":
+                    idle_ticks = 0
                     self._start(state)
-                elif self._should_run(now, self.stop_time, bool(state["stop_done"])):
+                elif stage == "stop":
+                    idle_ticks = 0
                     self._stop(state)
+                else:
+                    idle_ticks += 1
+                    if idle_ticks % max(1, int(300 / self.runtime.loop_interval_seconds)) == 0:
+                        pdt, sdt, tdt = self._cycle_datetimes(state)
+                        logging.info(
+                            "Waiting for next stage. cycle=%s prepare=%s start=%s stop=%s",
+                            state.get("cycle_date"),
+                            pdt.isoformat(),
+                            sdt.isoformat(),
+                            tdt.isoformat(),
+                        )
             except Exception as exc:
                 logging.exception("Stage execution failed: %s", exc)
                 state["last_error"] = str(exc)
@@ -668,7 +715,7 @@ def run_once(config: Dict[str, Any], stage: str) -> None:
     scheduler = DailyScheduler(config)
     state = scheduler._load_state()
     now = datetime.now(scheduler.tz)
-    state = scheduler._roll_day_if_needed(state, now)
+    state = scheduler._maybe_advance_cycle(state, now)
 
     if stage == "prepare":
         scheduler._prepare(state)
