@@ -19,15 +19,13 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-import requests
-from obsws_python import ReqClient
 
 
 VERSION_API_URL = (
@@ -62,6 +60,14 @@ class RuntimeConfig:
     state_file: str
     verify_login_before_prepare: bool
     stop_bilibili_after_obs_stop: bool
+    auto_stop_bilibili_on_manual_obs_stop: bool
+
+
+@dataclass
+class PluginConfigBridge:
+    enabled: bool
+    obs_plugin_config_path: str
+    sync_back_rtmp_to_plugin_config: bool
 
 
 class RetryError(RuntimeError):
@@ -119,14 +125,6 @@ def parse_hhmm(value: str) -> Tuple[int, int]:
     return hour, minute
 
 
-def next_occurrence(now: datetime, hhmm: str) -> datetime:
-    hour, minute = parse_hhmm(hhmm)
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if candidate <= now:
-        candidate += timedelta(days=1)
-    return candidate
-
-
 def retry_call(
     action: str,
     fn: Callable[[], Any],
@@ -163,6 +161,11 @@ class BilibiliClient:
         self.cookies = cookies
         self.timeout = timeout
 
+    def refresh_auth(self, room_id: str, csrf_token: str, cookies: str) -> None:
+        self.room_id = room_id
+        self.csrf_token = csrf_token
+        self.cookies = cookies
+
     def _headers(self) -> Dict[str, str]:
         headers = dict(DEFAULT_HEADERS)
         headers["Cookie"] = self.cookies
@@ -178,6 +181,8 @@ class BilibiliClient:
         return urlencode(sorted(signed_items.items()))
 
     def check_login(self) -> bool:
+        import requests
+
         resp = requests.get(CHECK_LOGIN_URL, headers=self._headers(), timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
@@ -189,6 +194,8 @@ class BilibiliClient:
             "ts": str(int(time.time())),
         }
         query = self._appsign(params)
+        import requests
+
         resp = requests.get(
             f"{VERSION_API_URL}?{query}", headers=self._headers(), timeout=self.timeout
         )
@@ -216,6 +223,8 @@ class BilibiliClient:
             "ts": str(int(time.time())),
         }
         data = self._appsign(params)
+        import requests
+
         resp = requests.post(
             START_LIVE_URL,
             data=data,
@@ -245,6 +254,8 @@ class BilibiliClient:
             "csrf_token": self.csrf_token,
             "csrf": self.csrf_token,
         }
+        import requests
+
         resp = requests.post(
             STOP_LIVE_URL,
             data=data,
@@ -264,7 +275,9 @@ class ObsController:
         self.password = password
         self.timeout = timeout
 
-    def _client(self) -> ReqClient:
+    def _client(self) -> Any:
+        from obsws_python import ReqClient
+
         return ReqClient(
             host=self.host,
             port=self.port,
@@ -281,6 +294,11 @@ class ObsController:
         status = client.get_stream_status()
         if not status.output_active:
             client.start_stream()
+
+    def is_stream_active(self) -> bool:
+        client = self._client()
+        status = client.get_stream_status()
+        return bool(status.output_active)
 
     def stop_stream(self) -> None:
         client = self._client()
@@ -302,16 +320,36 @@ class DailyScheduler:
             state_file=runtime_cfg["state_file"],
             verify_login_before_prepare=bool(runtime_cfg["verify_login_before_prepare"]),
             stop_bilibili_after_obs_stop=bool(runtime_cfg["stop_bilibili_after_obs_stop"]),
+            auto_stop_bilibili_on_manual_obs_stop=bool(
+                runtime_cfg.get("auto_stop_bilibili_on_manual_obs_stop", True)
+            ),
+        )
+
+        integration_cfg = config.get("integration", {})
+        default_plugin_path = (
+            "%APPDATA%/obs-studio/plugin_config/bilibili-stream-for-obs/config.json"
+        )
+        self.bridge = PluginConfigBridge(
+            enabled=bool(integration_cfg.get("use_obs_plugin_config", True)),
+            obs_plugin_config_path=str(
+                integration_cfg.get("obs_plugin_config_path", default_plugin_path)
+            ),
+            sync_back_rtmp_to_plugin_config=bool(
+                integration_cfg.get("sync_back_rtmp_to_plugin_config", True)
+            ),
         )
 
         self.tz = ZoneInfo(config["schedule"]["timezone"])
 
         bilibili_cfg = config["bilibili"]
         self.area_id = int(bilibili_cfg.get("area_id", 86))
+        self.manual_room_id = str(bilibili_cfg.get("room_id", ""))
+        self.manual_csrf_token = str(bilibili_cfg.get("csrf_token", ""))
+        self.manual_cookies = str(bilibili_cfg.get("cookies", ""))
         self.bili = BilibiliClient(
-            room_id=str(bilibili_cfg["room_id"]),
-            csrf_token=str(bilibili_cfg["csrf_token"]),
-            cookies=str(bilibili_cfg["cookies"]),
+            room_id=self.manual_room_id,
+            csrf_token=self.manual_csrf_token,
+            cookies=self.manual_cookies,
         )
 
         obs_cfg = config["obs"]
@@ -336,9 +374,66 @@ class DailyScheduler:
             "stop_done": False,
             "last_rtmp_addr": "",
             "last_rtmp_code": "",
+            "last_credentials_source": "",
+            "last_obs_stream_active": None,
             "last_error": "",
             "updated_at": "",
         }
+
+    def _resolve_plugin_config_path(self) -> str:
+        return os.path.expandvars(os.path.expanduser(self.bridge.obs_plugin_config_path))
+
+    def _read_plugin_config(self) -> Dict[str, Any]:
+        plugin_path = self._resolve_plugin_config_path()
+        if not os.path.exists(plugin_path):
+            raise FileNotFoundError(
+                f"OBS plugin config not found: {plugin_path}; please login once in plugin"
+            )
+        data = load_json(plugin_path)
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Invalid plugin config json: {plugin_path}")
+        return data
+
+    def _get_runtime_credentials(self) -> Tuple[str, str, str, int, str]:
+        if self.bridge.enabled:
+            plugin_cfg = self._read_plugin_config()
+            room_id = str(plugin_cfg.get("room_id", "")).strip()
+            csrf_token = str(plugin_cfg.get("csrf_token", "")).strip()
+            cookies = str(plugin_cfg.get("cookies", "")).strip()
+            area_id = int(plugin_cfg.get("area_id", self.area_id))
+            if not room_id or not csrf_token or not cookies:
+                raise RuntimeError(
+                    "OBS plugin config missing room_id/csrf_token/cookies; please scan-login in plugin first"
+                )
+            return room_id, csrf_token, cookies, area_id, "obs_plugin_config"
+
+        if not self.manual_room_id or not self.manual_csrf_token or not self.manual_cookies:
+            raise RuntimeError(
+                "manual bilibili credentials are missing; set bilibili.room_id/csrf_token/cookies"
+            )
+        return (
+            self.manual_room_id,
+            self.manual_csrf_token,
+            self.manual_cookies,
+            self.area_id,
+            "manual_config",
+        )
+
+    def _refresh_bilibili_client(self, state: Dict[str, Any]) -> None:
+        room_id, csrf_token, cookies, area_id, source = self._get_runtime_credentials()
+        self.area_id = area_id
+        self.bili.refresh_auth(room_id=room_id, csrf_token=csrf_token, cookies=cookies)
+        state["last_credentials_source"] = source
+
+    def _sync_rtmp_to_plugin_config(self, rtmp_addr: str, rtmp_code: str) -> None:
+        if not (self.bridge.enabled and self.bridge.sync_back_rtmp_to_plugin_config):
+            return
+
+        plugin_path = self._resolve_plugin_config_path()
+        plugin_cfg = self._read_plugin_config()
+        plugin_cfg["rtmp_addr"] = rtmp_addr
+        plugin_cfg["rtmp_code"] = rtmp_code
+        save_json(plugin_path, plugin_cfg)
 
     def _load_state(self) -> Dict[str, Any]:
         if not os.path.exists(self.runtime.state_file):
@@ -377,7 +472,48 @@ class DailyScheduler:
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return now >= target and not done
 
+
+    def _handle_manual_obs_stop_if_needed(self, state: Dict[str, Any]) -> None:
+        if not self.runtime.auto_stop_bilibili_on_manual_obs_stop:
+            return
+        if not state.get("start_done") or state.get("stop_done"):
+            return
+
+        obs_active = retry_call(
+            "obs_get_stream_status",
+            self.obs.is_stream_active,
+            self.runtime.retry_count,
+            self.runtime.retry_base_delay_seconds,
+            self.runtime.retry_max_delay_seconds,
+        )
+
+        previous = state.get("last_obs_stream_active")
+        state["last_obs_stream_active"] = bool(obs_active)
+
+        if previous is None:
+            self._save_state(state)
+            return
+
+        if bool(previous) and not bool(obs_active):
+            logging.info(
+                "Detected OBS stream stopped manually; syncing Bilibili stop-live"
+            )
+            if self.runtime.stop_bilibili_after_obs_stop:
+                self._refresh_bilibili_client(state)
+                retry_call(
+                    "bilibili_stop_live",
+                    self.bili.stop_live,
+                    self.runtime.retry_count,
+                    self.runtime.retry_base_delay_seconds,
+                    self.runtime.retry_max_delay_seconds,
+                )
+            state["stop_done"] = True
+            state["last_error"] = ""
+            self._save_state(state)
+
     def _prepare(self, state: Dict[str, Any]) -> None:
+        self._refresh_bilibili_client(state)
+
         if self.runtime.verify_login_before_prepare:
             ok = retry_call(
                 "check_login",
@@ -401,6 +537,7 @@ class DailyScheduler:
         state["prepare_done"] = True
         state["last_error"] = ""
         self._save_state(state)
+        self._sync_rtmp_to_plugin_config(rtmp_addr, rtmp_code)
         logging.info("Prepare done: obtained RTMP address and stream key")
 
     def _start(self, state: Dict[str, Any]) -> None:
@@ -417,6 +554,7 @@ class DailyScheduler:
             self.runtime.retry_max_delay_seconds,
         )
         state["start_done"] = True
+        state["last_obs_stream_active"] = True
         state["last_error"] = ""
         self._save_state(state)
         logging.info("Start done: OBS streaming started")
@@ -431,6 +569,7 @@ class DailyScheduler:
         )
 
         if self.runtime.stop_bilibili_after_obs_stop:
+            self._refresh_bilibili_client(state)
             retry_call(
                 "bilibili_stop_live",
                 self.bili.stop_live,
@@ -440,6 +579,7 @@ class DailyScheduler:
             )
 
         state["stop_done"] = True
+        state["last_obs_stream_active"] = False
         state["last_error"] = ""
         self._save_state(state)
         logging.info("Stop done: OBS stopped and Bilibili room closed")
@@ -459,6 +599,8 @@ class DailyScheduler:
             state = self._roll_day_if_needed(self._load_state(), now)
 
             try:
+                self._handle_manual_obs_stop_if_needed(state)
+
                 if self._should_run(now, self.prepare_time, bool(state["prepare_done"])):
                     self._prepare(state)
                 elif self._should_run(now, self.start_time, bool(state["start_done"])):
@@ -503,20 +645,70 @@ def validate_config(config: Dict[str, Any]) -> None:
     parse_hhmm(config["schedule"]["stop_time"])
     ZoneInfo(config["schedule"]["timezone"])
 
+    integration_cfg = config.get("integration", {})
+    if "obs_plugin_config_path" in integration_cfg:
+        path = str(integration_cfg["obs_plugin_config_path"])
+        if not path.strip():
+            raise ValueError("integration.obs_plugin_config_path must not be empty")
+
+
+def check_runtime_dependencies(mode: str) -> None:
+    need_requests = mode in {"run", "prepare", "stop", "doctor"}
+    need_obsws = mode in {"run", "start", "stop", "doctor"}
+
+    missing = []
+    if need_requests:
+        try:
+            import requests  # noqa: F401
+        except Exception:
+            missing.append("requests")
+    if need_obsws:
+        try:
+            from obsws_python import ReqClient  # noqa: F401
+        except Exception:
+            missing.append("obsws-python")
+
+    if missing:
+        raise RuntimeError(
+            "Missing runtime dependencies: "
+            + ", ".join(missing)
+            + ". Install with: python -m pip install -r automation/requirements.txt"
+        )
+
+
+def run_doctor(config: Dict[str, Any]) -> None:
+    check_runtime_dependencies("doctor")
+
+    scheduler = DailyScheduler(config)
+    state = scheduler._default_state()
+    scheduler._refresh_bilibili_client(state)
+
+    print("[doctor] dependencies: ok")
+    print(f"[doctor] credentials source: {state['last_credentials_source']}")
+    if scheduler.bridge.enabled:
+        print(f"[doctor] plugin config path: {scheduler._resolve_plugin_config_path()}")
+    print("[doctor] config validation: ok")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="OBS + Bilibili daily auto stream scheduler")
     parser.add_argument("--config", required=True, help="Path to config JSON")
     parser.add_argument(
         "--mode",
-        choices=["run", "prepare", "start", "stop"],
+        choices=["run", "prepare", "start", "stop", "doctor"],
         default="run",
-        help="run=daemon loop; others execute stage once",
+        help="run=daemon loop; doctor=preflight checks; others execute stage once",
     )
     args = parser.parse_args()
 
     config = load_json(args.config)
     validate_config(config)
+
+    if args.mode == "doctor":
+        run_doctor(config)
+        return 0
+
+    check_runtime_dependencies(args.mode)
 
     runtime_cfg = config["runtime"]
     setup_logging(

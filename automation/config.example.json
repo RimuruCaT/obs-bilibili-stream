@@ -1,14 +1,19 @@
 {
   "bilibili": {
-    "room_id": "12345",
-    "csrf_token": "your_csrf_token",
-    "cookies": "SESSDATA=...; bili_jct=...; DedeUserID=...;"
+    "room_id": "",
+    "csrf_token": "",
+    "cookies": "",
+    "area_id": 86
+  },
+  "integration": {
+    "use_obs_plugin_config": true,
+    "obs_plugin_config_path": "%APPDATA%/obs-studio/plugin_config/bilibili-stream-for-obs/config.json",
+    "sync_back_rtmp_to_plugin_config": true
   },
   "obs": {
     "host": "127.0.0.1",
     "port": 4455,
     "password": "your_obs_websocket_password",
-    "connect_timeout_seconds": 10,
     "request_timeout_seconds": 10
   },
   "schedule": {
@@ -27,6 +32,7 @@
     "log_backup_count": 7,
     "log_max_bytes": 5242880,
     "verify_login_before_prepare": true,
-    "stop_bilibili_after_obs_stop": true
+    "stop_bilibili_after_obs_stop": true,
+    "auto_stop_bilibili_on_manual_obs_stop": true
   }
 }
