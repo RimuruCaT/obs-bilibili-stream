@@ -34,6 +34,10 @@ copy automation\config.example.json automation\config.json
 
 如果你明确不想读取插件配置，可把 `integration.use_obs_plugin_config` 改为 `false`，再手动填写 `bilibili.room_id/csrf_token/cookies`。
 
+- Windows 路径写在 JSON 里时要注意：
+  - 推荐用正斜杠：`C:/ProgramData/obs-studio/...`
+  - 或把反斜杠转义：`C:\ProgramData\obs-studio\...`
+
 ## 3. 运行模式
 
 ### 常驻模式（推荐）
@@ -98,3 +102,6 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 - 报错 `No time zone found with key Asia/Shanghai`：
   - 运行：`python -m pip install tzdata`
   - 然后重试 `--mode doctor`。
+
+- 报错 `Invalid \escape`（通常是 `config.json` 写了 `C:\xxx` 这种未转义路径）：
+  - 把路径改成 `C:/xxx`，或写成 `C:\\xxx`（双反斜杠）。

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -104,8 +105,20 @@ def setup_logging(log_file: str, max_bytes: int, backup_count: int) -> None:
 
 
 def load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        hint = ""
+        if "Invalid \\escape" in str(exc):
+            hint = (
+                "\nTip: Windows path in JSON must use escaped backslashes "
+                "(example: \"C:\\\\path\\\\file.json\") "
+                "or forward slashes (example: \"C:/path/file.json\")."
+            )
+        raise ValueError(
+            f"Invalid JSON in {path} at line {exc.lineno}, column {exc.colno}: {exc.msg}.{hint}"
+        ) from exc
 
 
 def save_json(path: str, data: Dict[str, Any]) -> None:
@@ -297,13 +310,37 @@ class ObsController:
 
     def set_stream_service_and_start(self, server: str, key: str) -> None:
         client = self._client()
-        client.set_stream_service_settings(
-            stream_service_type="rtmp_custom",
-            stream_service_settings={"server": server, "key": key, "use_auth": False},
-        )
+        self._set_stream_service_settings(client, server, key)
         status = client.get_stream_status()
         if not status.output_active:
             client.start_stream()
+
+    @staticmethod
+    def _set_stream_service_settings(client: Any, server: str, key: str) -> None:
+        payload = {"server": server, "key": key, "use_auth": False}
+        fn = getattr(client, "set_stream_service_settings", None)
+        if fn is None:
+            raise RuntimeError("obsws-python client missing set_stream_service_settings()")
+
+        try:
+            params = set(inspect.signature(fn).parameters)
+        except Exception:
+            params = set()
+
+        if {"stream_service_type", "stream_service_settings"}.issubset(params):
+            fn(stream_service_type="rtmp_custom", stream_service_settings=payload)
+            return
+
+        if {"stream_type", "stream_settings"}.issubset(params):
+            fn(stream_type="rtmp_custom", stream_settings=payload)
+            return
+
+        if {"service_type", "service_settings"}.issubset(params):
+            fn(service_type="rtmp_custom", service_settings=payload)
+            return
+
+        # Fallback for older/newer wrappers that only accept positional args
+        fn("rtmp_custom", payload)
 
     def is_stream_active(self) -> bool:
         client = self._client()
