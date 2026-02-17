@@ -523,9 +523,30 @@ class DailyScheduler:
             self._save_state(state)
             return state
 
-        prepare_dt, _start_dt, _stop_dt = self._cycle_datetimes(state)
-        # Start next cycle only after previous cycle finished.
-        if state.get("stop_done") and now >= (prepare_dt + timedelta(days=1)):
+        # Self-heal stale flags (e.g. manual tests or interrupted state writes).
+        # If a "done" flag appears before its stage time in current cycle, reset it.
+        prepare_dt, start_dt, stop_dt = self._cycle_datetimes(state)
+        stale = False
+        if now < prepare_dt and any(state.get(k) for k in ("prepare_done", "start_done", "stop_done")):
+            state.update({"prepare_done": False, "start_done": False, "stop_done": False})
+            stale = True
+        elif now < start_dt and any(state.get(k) for k in ("start_done", "stop_done")):
+            state.update({"start_done": False, "stop_done": False})
+            stale = True
+        elif now < stop_dt and state.get("stop_done"):
+            state["stop_done"] = False
+            stale = True
+
+        if stale:
+            logging.warning(
+                "Detected stale cycle flags before scheduled stage times; state auto-corrected for cycle=%s",
+                state.get("cycle_date"),
+            )
+            self._save_state(state)
+
+        _prepare_dt, _start_dt, stop_dt = self._cycle_datetimes(state)
+        # Start next cycle after stop stage time has passed and previous cycle finished.
+        if state.get("stop_done") and now >= stop_dt:
             next_cycle_date = (datetime.fromisoformat(str(state["cycle_date"])) + timedelta(days=1)).date().isoformat()
             logging.info("Advance stream cycle: %s -> %s", state["cycle_date"], next_cycle_date)
             state.update(
@@ -671,6 +692,14 @@ class DailyScheduler:
             self.stop_time,
             self.tz,
         )
+        state0 = self._load_state()
+        logging.info(
+            "State: cycle_date=%s prepare_done=%s start_done=%s stop_done=%s",
+            state0.get("cycle_date"),
+            state0.get("prepare_done"),
+            state0.get("start_done"),
+            state0.get("stop_done"),
+        )
 
         idle_ticks = 0
         while not self.stopper.stop_requested:
@@ -692,7 +721,7 @@ class DailyScheduler:
                     self._stop(state)
                 else:
                     idle_ticks += 1
-                    if idle_ticks % max(1, int(300 / self.runtime.loop_interval_seconds)) == 0:
+                    if idle_ticks % max(1, int(60 / self.runtime.loop_interval_seconds)) == 0:
                         pdt, sdt, tdt = self._cycle_datetimes(state)
                         logging.info(
                             "Waiting for next stage. cycle=%s prepare=%s start=%s stop=%s",
