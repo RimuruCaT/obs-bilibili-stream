@@ -84,6 +84,14 @@ class RetryError(RuntimeError):
     pass
 
 
+class NonRetryableError(RuntimeError):
+    """Error type for permanent failures that should not be retried."""
+
+
+class FaceVerificationRequired(NonRetryableError):
+    """Raised when Bilibili requires manual face verification."""
+
+
 class GracefulStop:
     def __init__(self) -> None:
         self.stop_requested = False
@@ -168,6 +176,8 @@ def retry_call(
     for attempt in range(1, retry_count + 1):
         try:
             return fn()
+        except NonRetryableError:
+            raise
         except Exception as exc:  # broad by design for long-running service robustness
             last_exc = exc
             if attempt == retry_count:
@@ -308,7 +318,7 @@ class BilibiliClient:
         code = payload.get("code")
         if code != 0:
             if code == 60024:
-                raise RuntimeError(
+                raise FaceVerificationRequired(
                     f"face verification required: {payload.get('data', {}).get('qr', '')}"
                 )
             raise RuntimeError(f"start live failed: {payload.get('message')}")
@@ -1020,6 +1030,10 @@ class DailyScheduler:
                             seconds,
                             state.get("cycle_date"),
                         )
+            except FaceVerificationRequired as exc:
+                logging.error("Face verification required, skip retries until manual verification is completed: %s", exc)
+                state["last_error"] = str(exc)
+                self._save_state(state)
             except Exception as exc:
                 logging.exception("Stage execution failed: %s", exc)
                 state["last_error"] = str(exc)
