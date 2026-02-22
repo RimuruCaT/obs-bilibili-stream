@@ -165,6 +165,15 @@ def resolve_timezone(tz_name: str) -> ZoneInfo:
         ) from exc
 
 
+def is_face_verification_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "face verification required" in text
+        or "face-auth-middle" in text
+        or "source_event=400" in text
+    )
+
+
 def retry_call(
     action: str,
     fn: Callable[[], Any],
@@ -179,6 +188,8 @@ def retry_call(
         except NonRetryableError:
             raise
         except Exception as exc:  # broad by design for long-running service robustness
+            if is_face_verification_error(exc):
+                raise FaceVerificationRequired(str(exc)) from exc
             last_exc = exc
             if attempt == retry_count:
                 break
@@ -506,6 +517,7 @@ class DailyScheduler:
             "last_obs_reconnecting": False,
             "obs_reconnect_window_start": "",
             "obs_reconnect_events": 0,
+            "face_verification_blocked": False,
             "last_error": "",
             "updated_at": "",
         }
@@ -697,6 +709,7 @@ class DailyScheduler:
                     "last_obs_reconnecting": False,
                     "obs_reconnect_window_start": "",
                     "obs_reconnect_events": 0,
+                    "face_verification_blocked": False,
                     "last_error": "",
                 }
             )
@@ -706,7 +719,11 @@ class DailyScheduler:
     def _next_pending_stage(self, state: Dict[str, Any], now: datetime) -> Optional[str]:
         prepare_dt, start_dt, stop_dt = self._cycle_datetimes(state)
 
-        if not state.get("prepare_done") and now >= prepare_dt:
+        if (
+            not state.get("prepare_done")
+            and now >= prepare_dt
+            and not state.get("face_verification_blocked", False)
+        ):
             return "prepare"
         if state.get("prepare_done") and not state.get("start_done") and now >= start_dt:
             return "start"
@@ -717,6 +734,8 @@ class DailyScheduler:
     def _next_stage_target(self, state: Dict[str, Any]) -> Tuple[str, datetime]:
         prepare_dt, start_dt, stop_dt = self._cycle_datetimes(state)
         if not state.get("prepare_done"):
+            if state.get("face_verification_blocked", False):
+                return "prepare_blocked(face_verification)", prepare_dt
             return "prepare", prepare_dt
         if not state.get("start_done"):
             return "start", start_dt
@@ -916,6 +935,7 @@ class DailyScheduler:
         state["last_rtmp_addr"] = rtmp_addr
         state["last_rtmp_code"] = rtmp_code
         state["prepare_done"] = True
+        state["face_verification_blocked"] = False
         state["last_error"] = ""
         self._save_state(state)
         self._sync_rtmp_to_plugin_config(rtmp_addr, rtmp_code)
@@ -1031,7 +1051,12 @@ class DailyScheduler:
                             state.get("cycle_date"),
                         )
             except FaceVerificationRequired as exc:
-                logging.error("Face verification required, skip retries until manual verification is completed: %s", exc)
+                if not state.get("face_verification_blocked", False):
+                    logging.error(
+                        "Face verification required. Prepare stage is blocked for current cycle until manual verification is completed: %s",
+                        exc,
+                    )
+                state["face_verification_blocked"] = True
                 state["last_error"] = str(exc)
                 self._save_state(state)
             except Exception as exc:
@@ -1051,6 +1076,7 @@ def run_once(config: Dict[str, Any], stage: str) -> None:
     state = scheduler._maybe_advance_cycle(state, now)
 
     if stage == "prepare":
+        state["face_verification_blocked"] = False
         scheduler._prepare(state)
     elif stage == "start":
         scheduler._start(state)
