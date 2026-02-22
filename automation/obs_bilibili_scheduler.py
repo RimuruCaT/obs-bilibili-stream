@@ -92,6 +92,10 @@ class FaceVerificationRequired(NonRetryableError):
     """Raised when Bilibili requires manual face verification."""
 
 
+class StartLiveTooFrequent(NonRetryableError):
+    """Raised when Bilibili rate-limits startLive frequency."""
+
+
 class GracefulStop:
     def __init__(self) -> None:
         self.stop_requested = False
@@ -174,6 +178,15 @@ def is_face_verification_error(exc: Exception) -> bool:
     )
 
 
+def is_start_live_too_frequent_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "开播太频繁" in text
+        or "too frequent" in text
+        or "please try again later" in text and "start live failed" in text
+    )
+
+
 def retry_call(
     action: str,
     fn: Callable[[], Any],
@@ -190,6 +203,8 @@ def retry_call(
         except Exception as exc:  # broad by design for long-running service robustness
             if is_face_verification_error(exc):
                 raise FaceVerificationRequired(str(exc)) from exc
+            if is_start_live_too_frequent_error(exc):
+                raise StartLiveTooFrequent(str(exc)) from exc
             last_exc = exc
             if attempt == retry_count:
                 break
@@ -518,6 +533,7 @@ class DailyScheduler:
             "obs_reconnect_window_start": "",
             "obs_reconnect_events": 0,
             "face_verification_blocked": False,
+            "start_live_rate_limited_blocked": False,
             "last_error": "",
             "updated_at": "",
         }
@@ -710,6 +726,7 @@ class DailyScheduler:
                     "obs_reconnect_window_start": "",
                     "obs_reconnect_events": 0,
                     "face_verification_blocked": False,
+                    "start_live_rate_limited_blocked": False,
                     "last_error": "",
                 }
             )
@@ -723,6 +740,7 @@ class DailyScheduler:
             not state.get("prepare_done")
             and now >= prepare_dt
             and not state.get("face_verification_blocked", False)
+            and not state.get("start_live_rate_limited_blocked", False)
         ):
             return "prepare"
         if state.get("prepare_done") and not state.get("start_done") and now >= start_dt:
@@ -736,6 +754,8 @@ class DailyScheduler:
         if not state.get("prepare_done"):
             if state.get("face_verification_blocked", False):
                 return "prepare_blocked(face_verification)", prepare_dt
+            if state.get("start_live_rate_limited_blocked", False):
+                return "prepare_blocked(start_live_too_frequent)", prepare_dt
             return "prepare", prepare_dt
         if not state.get("start_done"):
             return "start", start_dt
@@ -936,6 +956,7 @@ class DailyScheduler:
         state["last_rtmp_code"] = rtmp_code
         state["prepare_done"] = True
         state["face_verification_blocked"] = False
+        state["start_live_rate_limited_blocked"] = False
         state["last_error"] = ""
         self._save_state(state)
         self._sync_rtmp_to_plugin_config(rtmp_addr, rtmp_code)
@@ -1059,6 +1080,15 @@ class DailyScheduler:
                 state["face_verification_blocked"] = True
                 state["last_error"] = str(exc)
                 self._save_state(state)
+            except StartLiveTooFrequent as exc:
+                if not state.get("start_live_rate_limited_blocked", False):
+                    logging.error(
+                        "Bilibili start-live is rate-limited. Prepare stage is blocked for current cycle to avoid repeated attempts: %s",
+                        exc,
+                    )
+                state["start_live_rate_limited_blocked"] = True
+                state["last_error"] = str(exc)
+                self._save_state(state)
             except Exception as exc:
                 logging.exception("Stage execution failed: %s", exc)
                 state["last_error"] = str(exc)
@@ -1077,6 +1107,7 @@ def run_once(config: Dict[str, Any], stage: str) -> None:
 
     if stage == "prepare":
         state["face_verification_blocked"] = False
+        state["start_live_rate_limited_blocked"] = False
         scheduler._prepare(state)
     elif stage == "start":
         scheduler._start(state)
