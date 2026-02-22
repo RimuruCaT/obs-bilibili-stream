@@ -30,7 +30,13 @@ copy automation\config.example.json automation\config.json
 - `obs.host/port/password`：对应 OBS WebSocket (通常 4455)。
 - `schedule.prepare_time/start_time/stop_time`：每天执行时间（`HH:MM`）。
 - `schedule.timezone`：建议 `Asia/Shanghai`。
-- `runtime.auto_stop_bilibili_on_manual_obs_stop`：若检测到你在 OBS 手动点了“停止推流”，脚本会自动同步调用 B 站停播。
+- `runtime.enable_obs_auto_recover`：OBS 推流异常中断且停止重连后，自动用当前 RTMP 参数重新拉起推流（默认开启）。
+- `runtime.obs_inactive_grace_seconds`：OBS 非活跃判定宽限期（秒），避免“短暂重连抖动”被误判（默认 120）。
+- `runtime.obs_recover_cooldown_seconds`：两次自动恢复的最小间隔（秒，默认 180）。
+- `runtime.max_obs_recover_attempts_per_cycle`：单个直播周期内最大自动恢复次数（默认 8）。
+- `runtime.obs_reconnect_flap_window_seconds`：统计 OBS 重连抖动的时间窗口（秒，默认 300）。
+- `runtime.obs_reconnect_flap_threshold`：在窗口内达到该重连次数就触发主动恢复（默认 6）。
+- `runtime.auto_stop_bilibili_on_manual_obs_stop`：关闭自动恢复时，若检测到你在 OBS 手动点了“停止推流”，脚本会自动同步调用 B 站停播。
 - `runtime.enable_cookie_keepalive`：定时登录态保活检查并尝试刷新 cookies（默认开启）。
 - `runtime.cookie_keepalive_interval_minutes`：保活检查间隔分钟数（默认 20）。
 - `runtime.wait_heartbeat_interval_minutes`：空闲等待日志心跳间隔（分钟，默认 10）。
@@ -39,7 +45,7 @@ copy automation\config.example.json automation\config.json
 
 - Windows 路径写在 JSON 里时要注意：
   - 推荐用正斜杠：`C:/ProgramData/obs-studio/...`
-  - 或把反斜杠转义：`C:\ProgramData\obs-studio\...`
+  - 或把反斜杠转义：`C:\\ProgramData\\obs-studio\\...`
 
 ## 3. 运行模式
 
@@ -73,7 +79,8 @@ python automation/obs_bilibili_scheduler.py --config automation/config.json --mo
 - **跨天调度顺序**：`prepare -> start -> stop` 以一个 cycle 执行；当 `stop_time` 早于/等于 `start_time` 时会自动按“次日停播”处理。
 - **Cookie 保活与回写**：运行中按间隔调用登录态检查；若服务端返回新 cookies，会自动回写到插件配置，尽量降低过期概率。
 - **空闲心跳日志**：`run` 模式未到触发时间时会周期性输出下一阶段等待信息（英文，包含 “in HH:MM:SS” 倒计时），避免看起来像“卡住不动”。
-- **OBS 手动停播联动**：你在 OBS 手动点击停止推流后，脚本检测到流状态从活跃变为停止，会自动调用 B 站停播接口，避免还要在插件里再点一次“停止直播”。
+- **OBS 断流自动恢复**：若 OBS 出现“反复重连后掉线”，脚本不仅会在非活跃宽限期后恢复，还会统计 reconnect 抖动次数；在窗口内达到阈值会主动重设推流并重启流（带冷却与次数限制），尽量避免直播被动中断。
+- **OBS 手动停播联动**：当你关闭自动恢复后，脚本可把 OBS 手动停播同步为 B 站停播，避免还要在插件里再点一次“停止直播”。
 - **重试机制**：接口/OBS 调用失败自动重试（指数退避 + 抖动）。
 - **状态文件**：`runtime.state_file` 记录当天阶段状态，避免重复执行。
 - **状态自修复**：若检测到阶段标记与当前时间矛盾（例如测试时残留了已完成标记），`run` 模式会自动修正并继续推进。

@@ -36,6 +36,12 @@
     "auto_stop_bilibili_on_manual_obs_stop": true,
     "enable_cookie_keepalive": true,
     "cookie_keepalive_interval_minutes": 20,
-    "wait_heartbeat_interval_minutes": 10
+    "wait_heartbeat_interval_minutes": 10,
+    "obs_inactive_grace_seconds": 120,
+    "obs_recover_cooldown_seconds": 180,
+    "enable_obs_auto_recover": true,
+    "max_obs_recover_attempts_per_cycle": 8,
+    "obs_reconnect_flap_window_seconds": 300,
+    "obs_reconnect_flap_threshold": 6
   }
 }
