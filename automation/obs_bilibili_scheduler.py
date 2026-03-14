@@ -400,6 +400,20 @@ class ObsController:
         if not status.output_active:
             client.start_stream()
 
+    def restart_stream_with_settings(self, server: str, key: str) -> None:
+        client = self._client()
+        status = client.get_stream_status()
+        if bool(getattr(status, "output_active", False)):
+            logging.info("OBS output is active during recover; stopping stream before applying new settings")
+            client.stop_stream()
+            time.sleep(1.0)
+
+        self._set_stream_service_settings(client, server, key)
+
+        status_after = client.get_stream_status()
+        if not bool(getattr(status_after, "output_active", False)):
+            client.start_stream()
+
     @staticmethod
     def _set_stream_service_settings(client: Any, server: str, key: str) -> None:
         payload = {"server": server, "key": key, "use_auth": False}
@@ -798,7 +812,7 @@ class DailyScheduler:
         )
         retry_call(
             "obs_auto_recover_start_stream",
-            lambda: self.obs.set_stream_service_and_start(
+            lambda: self.obs.restart_stream_with_settings(
                 state["last_rtmp_addr"], state["last_rtmp_code"]
             ),
             self.runtime.retry_count,
