@@ -1,0 +1,48 @@
+{
+  "bilibili": {
+    "room_id": "",
+    "csrf_token": "",
+    "cookies": "",
+    "area_id": 86
+  },
+  "integration": {
+    "use_obs_plugin_config": true,
+    "obs_plugin_config_path": "%APPDATA%/obs-studio/plugin_config/bilibili-stream-for-obs/config.json",
+    "sync_back_rtmp_to_plugin_config": true
+  },
+  "obs": {
+    "host": "127.0.0.1",
+    "port": 4455,
+    "password": "your_obs_websocket_password",
+    "request_timeout_seconds": 10
+  },
+  "schedule": {
+    "timezone": "Asia/Shanghai",
+    "prepare_time": "17:30",
+    "start_time": "18:00",
+    "stop_time": "02:00"
+  },
+  "runtime": {
+    "retry_count": 5,
+    "retry_base_delay_seconds": 2,
+    "retry_max_delay_seconds": 30,
+    "loop_interval_seconds": 20,
+    "state_file": "./automation/state.json",
+    "log_file": "./automation/auto_stream.log",
+    "log_backup_count": 7,
+    "log_max_bytes": 5242880,
+    "verify_login_before_prepare": true,
+    "stop_bilibili_after_obs_stop": true,
+    "auto_stop_bilibili_on_manual_obs_stop": true,
+    "enable_cookie_keepalive": true,
+    "cookie_keepalive_interval_minutes": 20,
+    "wait_heartbeat_interval_minutes": 10,
+    "obs_inactive_grace_seconds": 120,
+    "obs_recover_cooldown_seconds": 180,
+    "enable_obs_auto_recover": true,
+    "max_obs_recover_attempts_per_cycle": 8,
+    "obs_reconnect_flap_window_seconds": 300,
+    "obs_reconnect_flap_threshold": 6,
+    "obs_reconnecting_grace_seconds": 45
+  }
+}
