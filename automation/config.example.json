@@ -42,6 +42,7 @@
     "enable_obs_auto_recover": true,
     "max_obs_recover_attempts_per_cycle": 8,
     "obs_reconnect_flap_window_seconds": 300,
-    "obs_reconnect_flap_threshold": 6
+    "obs_reconnect_flap_threshold": 6,
+    "obs_reconnecting_grace_seconds": 45
   }
 }

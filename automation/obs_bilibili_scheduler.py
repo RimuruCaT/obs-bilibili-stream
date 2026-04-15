@@ -71,6 +71,7 @@ class RuntimeConfig:
     max_obs_recover_attempts_per_cycle: int
     obs_reconnect_flap_window_seconds: int
     obs_reconnect_flap_threshold: int
+    obs_reconnecting_grace_seconds: int
 
 
 @dataclass
@@ -486,6 +487,7 @@ class DailyScheduler:
             max_obs_recover_attempts_per_cycle=int(runtime_cfg.get("max_obs_recover_attempts_per_cycle", 8)),
             obs_reconnect_flap_window_seconds=int(runtime_cfg.get("obs_reconnect_flap_window_seconds", 300)),
             obs_reconnect_flap_threshold=int(runtime_cfg.get("obs_reconnect_flap_threshold", 6)),
+            obs_reconnecting_grace_seconds=int(runtime_cfg.get("obs_reconnecting_grace_seconds", 45)),
         )
 
         integration_cfg = config.get("integration", {})
@@ -546,6 +548,7 @@ class DailyScheduler:
             "last_obs_reconnecting": False,
             "obs_reconnect_window_start": "",
             "obs_reconnect_events": 0,
+            "obs_reconnecting_since": "",
             "face_verification_blocked": False,
             "start_live_rate_limited_blocked": False,
             "last_error": "",
@@ -739,6 +742,7 @@ class DailyScheduler:
                     "last_obs_reconnecting": False,
                     "obs_reconnect_window_start": "",
                     "obs_reconnect_events": 0,
+                    "obs_reconnecting_since": "",
                     "face_verification_blocked": False,
                     "start_live_rate_limited_blocked": False,
                     "last_error": "",
@@ -810,25 +814,32 @@ class DailyScheduler:
             attempts + 1,
             self.runtime.max_obs_recover_attempts_per_cycle,
         )
+
+        state["obs_recover_attempts"] = attempts + 1
+        state["obs_last_recover_at"] = now.isoformat()
+        state["last_error"] = ""
+        self._save_state(state)
+
         retry_call(
-            "obs_auto_recover_start_stream",
-            lambda: self.obs.restart_stream_with_settings(
-                state["last_rtmp_addr"], state["last_rtmp_code"]
-            ),
+            "obs_stop_stream_for_recover",
+            self.obs.stop_stream,
             self.runtime.retry_count,
             self.runtime.retry_base_delay_seconds,
             self.runtime.retry_max_delay_seconds,
         )
-        state["obs_recover_attempts"] = attempts + 1
-        state["obs_last_recover_at"] = now.isoformat()
-        state["obs_inactive_since"] = ""
+
+        self._prepare(state)
+        self._start(state, reset_recover_counters=False)
+
         state["last_obs_stream_active"] = True
         state["last_obs_reconnecting"] = False
         state["obs_reconnect_window_start"] = ""
         state["obs_reconnect_events"] = 0
+        state["obs_reconnecting_since"] = ""
+        state["obs_inactive_since"] = ""
         state["last_error"] = ""
         self._save_state(state)
-        logging.info("OBS auto-recover succeeded")
+        logging.info("OBS auto-recover succeeded via stop-prepare-start")
 
     def _handle_manual_obs_stop_if_needed(self, state: Dict[str, Any]) -> None:
         if not state.get("start_done") or state.get("stop_done"):
@@ -851,11 +862,36 @@ class DailyScheduler:
         state["last_obs_stream_active"] = obs_active
         state["last_obs_reconnecting"] = obs_reconnecting
 
+        reconnecting_since_raw = str(state.get("obs_reconnecting_since", "")).strip()
+        reconnecting_since = None
+        if reconnecting_since_raw:
+            try:
+                reconnecting_since = datetime.fromisoformat(reconnecting_since_raw)
+            except Exception:
+                reconnecting_since = None
+
+        if obs_reconnecting:
+            if reconnecting_since is None:
+                state["obs_reconnecting_since"] = now.isoformat()
+                reconnecting_since = now
+        else:
+            state["obs_reconnecting_since"] = ""
+
         if previous_active is None:
             if obs_active:
                 state["obs_inactive_since"] = ""
             self._save_state(state)
             return
+
+        if obs_reconnecting and reconnecting_since is not None:
+            reconnecting_seconds = max(0, int((now - reconnecting_since).total_seconds()))
+            if (
+                reconnecting_seconds >= self.runtime.obs_reconnecting_grace_seconds
+                and self.runtime.enable_obs_auto_recover
+                and self._can_trigger_obs_recover(state, now)
+            ):
+                self._do_obs_recover(state, now, f"reconnecting_{reconnecting_seconds}s")
+                return
 
         if obs_reconnecting and not previous_reconnecting:
             window_start_raw = str(state.get("obs_reconnect_window_start", "")).strip()
@@ -976,7 +1012,7 @@ class DailyScheduler:
         self._sync_rtmp_to_plugin_config(rtmp_addr, rtmp_code)
         logging.info("Prepare done: obtained RTMP address and stream key")
 
-    def _start(self, state: Dict[str, Any]) -> None:
+    def _start(self, state: Dict[str, Any], reset_recover_counters: bool = True) -> None:
         if not state["last_rtmp_addr"] or not state["last_rtmp_code"]:
             raise RuntimeError("RTMP params missing, run prepare stage first")
 
@@ -992,11 +1028,13 @@ class DailyScheduler:
         state["start_done"] = True
         state["last_obs_stream_active"] = True
         state["obs_inactive_since"] = ""
-        state["obs_recover_attempts"] = 0
-        state["obs_last_recover_at"] = ""
+        if reset_recover_counters:
+            state["obs_recover_attempts"] = 0
+            state["obs_last_recover_at"] = ""
         state["last_obs_reconnecting"] = False
         state["obs_reconnect_window_start"] = ""
         state["obs_reconnect_events"] = 0
+        state["obs_reconnecting_since"] = ""
         state["last_error"] = ""
         self._save_state(state)
         logging.info("Start done: OBS streaming started")
@@ -1026,6 +1064,7 @@ class DailyScheduler:
         state["last_obs_reconnecting"] = False
         state["obs_reconnect_window_start"] = ""
         state["obs_reconnect_events"] = 0
+        state["obs_reconnecting_since"] = ""
         state["last_error"] = ""
         self._save_state(state)
         logging.info("Stop done: OBS stopped and Bilibili room closed")
@@ -1154,6 +1193,7 @@ def validate_config(config: Dict[str, Any]) -> None:
         "max_obs_recover_attempts_per_cycle",
         "obs_reconnect_flap_window_seconds",
         "obs_reconnect_flap_threshold",
+        "obs_reconnecting_grace_seconds",
     ]
     for key in int_fields:
         if key in runtime_cfg and int(runtime_cfg[key]) < 1:
